@@ -15,4 +15,5 @@
 # vendor/
 
 # binaries
-dist/server
+dist
+src/server
