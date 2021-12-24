@@ -4,6 +4,9 @@ import (
 	"flag"
 	"strconv"
 	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/Allenxuxu/gev"
 	"github.com/Allenxuxu/gev/connection"
@@ -13,6 +16,8 @@ import (
 var clients sync.Map
 var port int = 1900
 var serverAddress = ""
+var idleTimeMin int64 = 5
+var lastTimeUsedMs = time.Now().UnixMilli()
 
 type ipxServer struct {
 }
@@ -28,6 +33,8 @@ func (s *ipxServer) OnConnect(c *connection.Connection) {
 }
 
 func (s *ipxServer) OnMessage(c *connection.Connection, ctx interface{}, data []byte) (out interface{}) {
+	atomic.StoreInt64(&lastTimeUsedMs, time.Now().UnixMilli())
+
 	header := IPXHeader{}
 	header.fromBytes(data)
 
@@ -78,7 +85,27 @@ func main() {
 
 	flag.IntVar(&port, "port", port, "server port")
 	flag.IntVar(&loops, "loops", -1, "num loops")
+	flag.Int64Var(&idleTimeMin, "timeout", idleTimeMin, "terminate after (min) ")
 	flag.Parse()
+
+	idleTicker := time.NewTicker(1 * time.Minute)
+	quit := make(chan struct{})
+	go func() {
+		idleTimeMs := idleTimeMin * 60 * 1000
+		for {
+			select {
+			case <-idleTicker.C:
+				usedMs := atomic.LoadInt64(&lastTimeUsedMs)
+				if time.Now().UnixMilli()-usedMs > idleTimeMs {
+					log.Info("Idle... Exiting...")
+					syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+				}
+			case <-quit:
+				idleTicker.Stop()
+				return
+			}
+		}
+	}()
 
 	server, err := gev.NewServer(handler,
 		gev.Network("tcp"),
@@ -91,7 +118,8 @@ func main() {
 		panic(err)
 	}
 
-	log.Info("Server started on port ", port)
+	log.Info("Server started on port: ", port, ", timeout: ", idleTimeMin, " min")
 	serverAddress = "127.0.0.1:" + strconv.Itoa((port))
 	server.Start()
+	close(quit)
 }
