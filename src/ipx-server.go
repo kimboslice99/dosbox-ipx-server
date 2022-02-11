@@ -2,6 +2,8 @@ package main
 
 import (
 	"flag"
+	"io/ioutil"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -16,7 +18,9 @@ import (
 var clients sync.Map
 var port int = 1900
 var serverAddress = ""
-var idleTimeMin int64 = 5
+var idleTimeMin int64 = 15
+var sessionTestIntervalMin int64 = 5
+var testSession = ""
 var lastTimeUsedMs = time.Now().UnixMilli()
 
 type ipxServer struct {
@@ -86,19 +90,43 @@ func main() {
 	flag.IntVar(&port, "port", port, "server port")
 	flag.IntVar(&loops, "loops", -1, "num loops")
 	flag.Int64Var(&idleTimeMin, "timeout", idleTimeMin, "terminate after (min) ")
+	flag.StringVar(&testSession, "test", "", "use this url to test session")
 	flag.Parse()
 
 	idleTicker := time.NewTicker(1 * time.Minute)
 	quit := make(chan struct{})
 	go func() {
+		var sessionTestedAtMs int64 = 0
+		sessionTestIntervalMs := sessionTestIntervalMin * 60 * 1000
 		idleTimeMs := idleTimeMin * 60 * 1000
 		for {
 			select {
 			case <-idleTicker.C:
+				now := time.Now().UnixMilli()
 				usedMs := atomic.LoadInt64(&lastTimeUsedMs)
-				if time.Now().UnixMilli()-usedMs > idleTimeMs {
+				if now-usedMs > idleTimeMs {
 					log.Info("Idle... Exiting...")
 					syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+				}
+				if len(testSession) > 0 && (now-sessionTestedAtMs) > sessionTestIntervalMs {
+					sessionTestedAtMs = now
+					log.Info("Test session with url: ", testSession)
+					resp, err := http.Get(testSession)
+					if err != nil {
+						log.Info(err)
+						syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+					} else {
+						body, err := ioutil.ReadAll(resp.Body)
+						if err != nil {
+							log.Info(err)
+							syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+						} else if string(body) != "{\"code\":200,\"alive\":true}" {
+							log.Info("Not live, exiting... status: ", string(body))
+							syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+						} else {
+							log.Info("Session is live...")
+						}
+					}
 				}
 			case <-quit:
 				idleTicker.Stop()
@@ -118,7 +146,8 @@ func main() {
 		panic(err)
 	}
 
-	log.Info("Server started on port: ", port, ", timeout: ", idleTimeMin, " min")
+	log.Info("Server started on port: ", port, ", timeout: ", idleTimeMin, " min",
+		", test-session: ", testSession)
 	serverAddress = "127.0.0.1:" + strconv.Itoa((port))
 	server.Start()
 	close(quit)
