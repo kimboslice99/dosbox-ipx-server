@@ -3,15 +3,65 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 
-	"github.com/Allenxuxu/gev/connection"
-	"github.com/Allenxuxu/ringbuffer"
-	"github.com/gobwas/pool/pbytes"
+	"github.com/gorilla/websocket"
 )
 
-const headerLength = 4
+type IpxHandler struct {
+	clients       sync.Map
+	serverAddress string
+}
 
-type IPXProtocol struct{}
+func (handler *IpxHandler) OnConnect(c *websocket.Conn) {
+	address := c.RemoteAddr().String()
+	client, ok := handler.clients.Load(address)
+	if ok {
+		client.(*websocket.Conn).Close()
+	}
+	handler.clients.Store(address, c)
+}
+
+func (handler *IpxHandler) OnMessage(c *websocket.Conn, data []byte) {
+	header := IPXHeader{}
+	header.fromBytes(data)
+
+	if header.Dest.Socket == 0x2 && header.Dest.Host == 0x0 {
+		// registration
+		header.CheckSum = 0xffff
+		header.Length = 30
+		header.TransControl = 0
+		header.PType = 0
+
+		header.Dest.Network = 0
+		header.Dest.setAddress(c.RemoteAddr().String())
+		header.Dest.Socket = 0x2
+
+		header.Src.Network = 1
+		header.Src.setAddress(handler.serverAddress)
+		header.Src.Socket = 0x2
+
+		c.WriteMessage(websocket.BinaryMessage, header.toBytes())
+	} else if header.Dest.Host == 0xffffffff {
+		// broadcast
+		handler.clients.Range(func(address, dest interface{}) bool {
+			if c != dest {
+				dest.(*websocket.Conn).WriteMessage(websocket.BinaryMessage, data)
+			}
+			return true
+		})
+	} else {
+		dest, ok := handler.clients.Load(header.Dest.Address())
+		if ok {
+			dest.(*websocket.Conn).WriteMessage(websocket.BinaryMessage, data)
+		}
+	}
+}
+
+func (handler *IpxHandler) OnClose(c *websocket.Conn) {
+	address := c.RemoteAddr().String()
+	handler.clients.Delete(address)
+}
 
 type IPXTransport struct {
 	Network uint32
@@ -28,30 +78,6 @@ type IPXHeader struct {
 
 	Dest IPXTransport
 	Src  IPXTransport
-}
-
-func (d *IPXProtocol) UnPacket(c *connection.Connection, buffer *ringbuffer.RingBuffer) (interface{}, []byte) {
-	if buffer.VirtualLength() > headerLength {
-		buf := pbytes.GetLen(headerLength)
-		defer pbytes.Put(buf)
-		_, _ = buffer.VirtualRead(buf)
-		packetLen := binary.BigEndian.Uint16(buf[2:4])
-		buffer.VirtualRevert()
-
-		if buffer.VirtualLength() >= int(packetLen) {
-			ret := make([]byte, packetLen)
-			_, _ = buffer.VirtualRead(ret)
-			buffer.VirtualFlush()
-
-			return nil, ret
-		}
-	}
-
-	return nil, nil
-}
-
-func (d *IPXProtocol) Packet(c *connection.Connection, data interface{}) []byte {
-	return data.([]byte)
 }
 
 func (header *IPXHeader) toBytes() []byte {
