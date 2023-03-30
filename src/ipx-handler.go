@@ -9,20 +9,27 @@ import (
 )
 
 type IpxHandler struct {
-	clients       sync.Map
+	rooms         sync.Map
 	serverAddress string
 }
 
-func (handler *IpxHandler) OnConnect(c *websocket.Conn) {
-	address := c.RemoteAddr().String()
-	client, ok := handler.clients.Load(address)
-	if ok {
-		client.(*websocket.Conn).Close()
-	}
-	handler.clients.Store(address, c)
+type IpxRoom struct {
+	clients *sync.Map
 }
 
-func (handler *IpxHandler) OnMessage(c *websocket.Conn, data []byte) {
+func (handler *IpxHandler) OnConnect(conn *websocket.Conn, room string) {
+	address := conn.RemoteAddr().String()
+	ipxRoom, _ := handler.rooms.LoadOrStore(room, &IpxRoom{
+		clients: &sync.Map{},
+	})
+	clients := ipxRoom.(*IpxRoom).clients
+	prev, loaded := clients.Swap(address, conn)
+	if loaded {
+		prev.(*websocket.Conn).Close()
+	}
+}
+
+func (handler *IpxHandler) OnMessage(conn *websocket.Conn, room string, data []byte) {
 	header := IPXHeader{}
 	header.fromBytes(data)
 
@@ -34,33 +41,54 @@ func (handler *IpxHandler) OnMessage(c *websocket.Conn, data []byte) {
 		header.PType = 0
 
 		header.Dest.Network = 0
-		header.Dest.setAddress(c.RemoteAddr().String())
+		header.Dest.setAddress(conn.RemoteAddr().String())
 		header.Dest.Socket = 0x2
 
 		header.Src.Network = 1
 		header.Src.setAddress(handler.serverAddress)
 		header.Src.Socket = 0x2
 
-		c.WriteMessage(websocket.BinaryMessage, header.toBytes())
-	} else if header.Dest.Host == 0xffffffff {
-		// broadcast
-		handler.clients.Range(func(address, dest interface{}) bool {
-			if c != dest {
+		conn.WriteMessage(websocket.BinaryMessage, header.toBytes())
+	} else {
+		ipxRoom, ok := handler.rooms.Load(room)
+		if !ok {
+			return
+		}
+		clients := ipxRoom.(*IpxRoom).clients
+
+		if header.Dest.Host == 0xffffffff {
+			// broadcast
+			clients.Range(func(address, dest interface{}) bool {
+				if conn != dest {
+					dest.(*websocket.Conn).WriteMessage(websocket.BinaryMessage, data)
+				}
+				return true
+			})
+		} else {
+			dest, ok := clients.Load(header.Dest.Address())
+			if ok {
 				dest.(*websocket.Conn).WriteMessage(websocket.BinaryMessage, data)
 			}
-			return true
-		})
-	} else {
-		dest, ok := handler.clients.Load(header.Dest.Address())
-		if ok {
-			dest.(*websocket.Conn).WriteMessage(websocket.BinaryMessage, data)
 		}
 	}
 }
 
-func (handler *IpxHandler) OnClose(c *websocket.Conn) {
-	address := c.RemoteAddr().String()
-	handler.clients.Delete(address)
+func (handler *IpxHandler) OnClose(conn *websocket.Conn, room string) {
+	address := conn.RemoteAddr().String()
+	ipxRoom, ok := handler.rooms.Load(room)
+	if ok {
+		clients := ipxRoom.(*IpxRoom).clients
+		clients.Delete(address)
+		empty := true
+		clients.Range(func(_, _ interface{}) bool {
+			empty = false
+			return false
+		})
+		// @caiiiycuk: we can accidentialy delete non empty room,
+		if empty {
+			handler.rooms.Delete(room)
+		}
+	}
 }
 
 type IPXTransport struct {

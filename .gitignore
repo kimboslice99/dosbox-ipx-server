@@ -17,3 +17,5 @@
 # binaries
 dist
 src/server
+etc/host.cert
+etc/host.key
