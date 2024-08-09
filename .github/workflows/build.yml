@@ -22,9 +22,10 @@ jobs:
         go-version: '1.20'
 
     - name: Build
-      run: go build -v ./src
+      working-directory: ./src
+      run: go build
       
     - name: Upload a Build Artifact
       uses: actions/upload-artifact@v4.3.6
       with:
-        path: "./"
+        path: "./src"
